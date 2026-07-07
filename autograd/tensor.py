@@ -106,16 +106,18 @@ class Tensor:
         if grad.shape != self.data.shape:
             # Find axes that were broadcast (present in grad but not in data)
             ndim_diff = grad.ndim - self.data.ndim
-            axes = tuple(range(ndim_diff))
+            axes = list(range(ndim_diff))
             # Also sum over axes where data has size 1 but grad doesn't
-            axes += tuple(
+            axes += [
                 i + ndim_diff
                 for i, (sg, sd) in enumerate(zip(self.data.shape, grad.shape[ndim_diff:]))
-                if sd == 1 and sg != 1
-            )
-            grad = grad.sum(axis=axes, keepdims=False)
-            # Reshape to match self.data.shape if needed
-            grad = grad.reshape(self.data.shape)
+                if sg == 1 and sd != 1
+            ]
+            if axes:
+                grad = grad.sum(axis=tuple(axes), keepdims=True)
+            # Remove leading axes if ndim_diff > 0
+            if ndim_diff > 0:
+                grad = grad.reshape(self.data.shape)
         self.grad += grad
 
     # ------------------------------------------------------------------
