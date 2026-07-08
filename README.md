@@ -1,6 +1,6 @@
 # minigrad
 
-A training engine built from raw NumPy — no PyTorch autograd, no `nn.Module`. Implements reverse-mode automatic differentiation, neural network layers, a transformer, AdamW optimizer, and trains on real data with a verified loss curve.
+A training engine built from raw NumPy — no PyTorch autograd, no `nn.Module`. Implements reverse-mode automatic differentiation, neural network layers, a decoder-only transformer, AdamW optimizer, and trains on Shakespeare with a verified loss curve.
 
 The goal: implement every piece that makes neural network training work, verify it is correct, and measure it honestly.
 
@@ -12,39 +12,47 @@ Most "I built a neural network" projects call `loss.backward()` and trust PyTorc
 
 ---
 
-## Phases
+## Training results (Shakespeare, Apple M5 CPU)
 
-**Phase 1: Autograd engine — done**
+```
+Model: 161,728 parameters
+  d_model=64, n_heads=4, n_layers=3, d_ff=256, seq_len=64
 
-- [x] `autograd/tensor.py` — a `Tensor` class that tracks operations in a computation graph and computes gradients via reverse-mode backprop. Every operation (`matmul`, `add`, `relu`, `softmax`, `gelu`, etc.) records a `_backward` function that propagates gradients to its inputs.
-- [x] Topological sort ensures each node is visited after all nodes that depend on it.
-- [x] Broadcasting handled in `_accumulate_grad`: gradients are summed over broadcast dimensions automatically.
-- [x] **Gradients verified numerically**: all operations verified to 1e-2 tolerance against float64 central differences.
-- [x] 23 tests: forward pass, hand-computed gradients, numerical gradient checks for add/mul/matmul/relu/exp/pow/softmax/gelu/composed expressions.
+step    1/500 | train=5.0637 | val=4.9370 | lr=1.20e-04
+step   50/500 | train=2.7275 | val=2.7468 | lr=2.98e-03
+step  100/500 | train=2.5890 | val=2.5710 | lr=2.84e-03
+step  200/500 | train=2.4971 | val=2.4694 | lr=2.19e-03
+step  300/500 | train=2.4421 | val=2.4203 | lr=1.32e-03
+step  400/500 | train=2.4720 | val=2.3611 | lr=5.85e-04
+step  500/500 | train=2.2585 | val=2.3350 | lr=3.00e-04
 
-**Phase 2: Neural network layers — done**
+Loss: 5.06 -> 2.26 (55.4% reduction in 500 steps, 12.2s)
+Throughput: 42,000 tokens/second on CPU
+Expected initial loss: log(65) = 4.17 (random model)
+```
 
-- [x] `nn/layers.py` — four layers built on the autograd engine:
-  - `Linear(in, out)` — `y = x @ W.T + b`, Kaiming uniform initialization
-  - `LayerNorm(d)` — normalize across last dimension, learnable scale/shift
-  - `Embedding(vocab, dim)` — lookup table with sparse gradient (only looked-up rows updated)
-  - `Dropout(p)` — inverted dropout, no-op at eval time
-- [x] `cross_entropy_loss` — numerically stable log-softmax + NLL in one pass. Gradient is `(softmax(logits) - one_hot(targets)) / N`.
-- [x] All layers gradient-checked: Linear input gradcheck, cross_entropy gradcheck.
-- [x] 21 tests: shape, values, gradient flow, dropout behavior, loss correctness.
+Generated text after 500 steps (temperature=0.8):
+```
+ROMEO:
+INI yow, d de thoned ilit, and m onee, ing, kn? ghind ar
 
-**Planned:**
+Cis y sous the char shawese, t hee isoncandsth w, a mend
+The oweme bute the.
 
-- [ ] Phase 3: Transformer (multi-head attention, MLP block, decoder)
-- [ ] Phase 4: AdamW optimizer + training loop
-- [ ] Phase 5: Train on Shakespeare, show loss curve converging
-- [ ] Phase 6: Gradient verification report + training benchmarks
+CENGLO:
+Gr chieven and onoda avery athif.
+```
+
+The generated text is garbled but shows real learned structure: character names
+(`ROMEO:`, `CENGLO:`), punctuation patterns, and word-like fragments. The model
+is learning English character statistics from a random initialization.
 
 ---
 
-## Key results so far
+## Gradient verification results
 
-**Phase 1 — gradient check results:**
+All operations verified to 1e-2 tolerance against float64 central differences:
+
 ```
 test_gradcheck_add        PASSED
 test_gradcheck_mul        PASSED
@@ -57,13 +65,56 @@ test_gradcheck_gelu       PASSED
 test_gradcheck_composed   PASSED   <- relu(x @ w + b).mean()
 ```
 
-**Phase 2 — layer verification:**
-```
-test_layernorm_normalizes_to_unit_variance   PASSED
-test_embedding_gradient_sparse               PASSED  <- only looked-up rows updated
-test_cross_entropy_gradcheck                 PASSED
-test_cross_entropy_perfect_prediction_low_loss PASSED
-```
+---
+
+## Bug found during development
+
+Phase 3 surfaced a real bug in `autograd/tensor.py`: `_accumulate_grad` was
+reshaping incorrectly when positional embeddings `(1, T, d)` were broadcast-added
+to token embeddings `(B, T, d)`. The gradient for the positional embedding had
+shape `(B, T, d)` but the tensor had shape `(1, T, d)` -- the code summed over
+the right axes but then called `.reshape()` which produced the wrong shape.
+Fixed by using `keepdims=True` during the sum and only removing leading axes
+separately. This is the kind of subtle broadcasting bug that's hard to catch
+without a real multi-layer forward pass that exercises the gradient path.
+
+---
+
+## Phases
+
+**Phase 1: Autograd engine — done**
+
+- [x] `autograd/tensor.py` — `Tensor` class with reverse-mode backprop. Every
+      operation records a `_backward` function. Topological sort drives the
+      backward pass.
+- [x] 23 tests including numerical gradient checks for all operations.
+
+**Phase 2: Neural network layers — done**
+
+- [x] `nn/layers.py` — `Linear`, `LayerNorm`, `Embedding`, `Dropout`,
+      `cross_entropy_loss`. All gradient-checked.
+- [x] 21 tests.
+
+**Phase 3: Transformer — done**
+
+- [x] `transformer/transformer.py` — decoder-only transformer with causal
+      self-attention, pre-norm MLP blocks, residual connections.
+- [x] Causal masking verified: changing token t+1 doesn't affect logits at t.
+- [x] 16 tests.
+
+**Phase 4: AdamW optimizer + training loop — done**
+
+- [x] `optim/optim.py` — AdamW with decoupled weight decay, cosine LR schedule
+      with warmup, gradient clipping, Trainer loop.
+- [x] AdamW verified to converge on a quadratic: finds minimum of (x-3)^2.
+- [x] 11 tests.
+
+**Phase 5: Train on Shakespeare — done**
+
+- [x] `train.py` — character-level language model on 1.1M character Shakespeare
+      corpus. Loss converges from 5.06 to 2.26 in 500 steps (12.2s on CPU).
+- [x] 42K tokens/second throughput.
+- [x] Text generation with temperature sampling.
 
 ---
 
@@ -73,7 +124,22 @@ test_cross_entropy_perfect_prediction_low_loss PASSED
 python3 -m venv venv
 source venv/bin/activate
 pip install numpy pytest
-python -m pytest tests/ -v   # 44 tests as of Phase 2
+python -m pytest tests/ -v   # 71 tests
+```
+
+---
+
+## Training
+
+```bash
+# Quick test (100 steps, ~3s)
+python train.py --steps 100
+
+# Full run (500 steps, ~12s)
+python train.py --steps 500 --generate
+
+# Longer run (better quality)
+python train.py --steps 2000 --d-model 128 --n-layers 4
 ```
 
 ---
@@ -83,14 +149,18 @@ python -m pytest tests/ -v   # 44 tests as of Phase 2
 ```
 minigrad/
 ├── autograd/
-│   └── tensor.py       <- Tensor class, autograd engine (Phase 1)
+│   └── tensor.py         <- Tensor, autograd engine (Phase 1)
 ├── nn/
-│   └── layers.py       <- Linear, LayerNorm, Embedding, Dropout, cross_entropy (Phase 2)
-├── transformer/        <- transformer architecture (Phase 3, planned)
-├── optim/              <- AdamW optimizer (Phase 4, planned)
-├── data/               <- Shakespeare dataset (Phase 5, planned)
-├── tests/              <- 44 tests, all passing
-└── train.py            <- training script (Phase 5, planned)
+│   └── layers.py         <- Linear, LayerNorm, Embedding, Dropout (Phase 2)
+├── transformer/
+│   └── transformer.py    <- decoder-only transformer (Phase 3)
+├── optim/
+│   └── optim.py          <- AdamW, cosine schedule, Trainer (Phase 4)
+├── data/
+│   ├── shakespeare.txt   <- 1.1M character training corpus
+│   └── training_results.json
+├── train.py              <- Shakespeare training script (Phase 5)
+└── tests/                <- 71 tests, all passing
 ```
 
 ---
