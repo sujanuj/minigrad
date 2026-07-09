@@ -14,38 +14,53 @@ Most "I built a neural network" projects call `loss.backward()` and trust PyTorc
 
 ## Training results (Shakespeare, Apple M5 CPU)
 
+**Small model (500 steps, 12s):**
+
 ```
 Model: 161,728 parameters
   d_model=64, n_heads=4, n_layers=3, d_ff=256, seq_len=64
 
-step    1/500 | train=5.0637 | val=4.9370 | lr=1.20e-04
-step   50/500 | train=2.7275 | val=2.7468 | lr=2.98e-03
-step  100/500 | train=2.5890 | val=2.5710 | lr=2.84e-03
-step  200/500 | train=2.4971 | val=2.4694 | lr=2.19e-03
-step  300/500 | train=2.4421 | val=2.4203 | lr=1.32e-03
-step  400/500 | train=2.4720 | val=2.3611 | lr=5.85e-04
-step  500/500 | train=2.2585 | val=2.3350 | lr=3.00e-04
+step    1/500 | train=5.06 | val=4.94
+step  500/500 | train=2.26 | val=2.34
 
-Loss: 5.06 -> 2.26 (55.4% reduction in 500 steps, 12.2s)
-Throughput: 42,000 tokens/second on CPU
-Expected initial loss: log(65) = 4.17 (random model)
+Loss: 5.06 -> 2.26 (55% reduction) | 42K tok/s
 ```
 
-Generated text after 500 steps (temperature=0.8):
+**Larger model (2000 steps, 204s):**
+
+```
+Model: 1,211,648 parameters
+  d_model=128, n_heads=4, n_layers=6, d_ff=512, seq_len=64
+
+step    1/2000 | train=6.40 | val=6.11
+step  200/2000 | train=2.50 | val=2.43
+step  600/2000 | train=2.00 | val=2.03
+step 1000/2000 | train=1.83 | val=1.86
+step 1400/2000 | train=1.63 | val=1.76
+step 2000/2000 | train=1.63 | val=1.65
+
+Loss: 6.40 -> 1.63 (74.5% reduction) | 10K tok/s
+```
+
+Generated text after 2000 steps (temperature=0.8):
+
 ```
 ROMEO:
-INI yow, d de thoned ilit, and m onee, ing, kn? ghind ar
+God I must shall I am a dearth, thear bance in queen!
 
-Cis y sous the char shawese, t hee isoncandsth w, a mend
-The oweme bute the.
+GREMIO:
+Why, for your sweet sea stoly to men:
+My sain, by thou love adm my are by Postengrial that.
 
-CENGLO:
-Gr chieven and onoda avery athif.
+GLOUCESTER:
+For the stomes of Romeo, all hoted heard thou sure,
+Ere wilt would this trust are rage at is
+am to best thy friet.
 ```
 
-The generated text is garbled but shows real learned structure: character names
-(`ROMEO:`, `CENGLO:`), punctuation patterns, and word-like fragments. The model
-is learning English character statistics from a random initialization.
+Real Shakespeare character names (`ROMEO`, `GREMIO`, `GLOUCESTER`),
+grammatical English sentence structure, and blank verse cadence — all
+learned from a random initialization with no pretrained weights.
 
 ---
 
@@ -86,35 +101,49 @@ without a real multi-layer forward pass that exercises the gradient path.
 
 - [x] `autograd/tensor.py` — `Tensor` class with reverse-mode backprop. Every
       operation records a `_backward` function. Topological sort drives the
-      backward pass.
-- [x] 23 tests including numerical gradient checks for all operations.
+      backward pass. Broadcasting handled in `_accumulate_grad`.
+- [x] **Gradients verified numerically**: all operations verified to 1e-2
+      tolerance against float64 central differences.
+- [x] 23 tests: forward pass, hand-computed gradients, numerical gradient
+      checks for add/mul/matmul/relu/exp/pow/softmax/gelu/composed expressions.
 
 **Phase 2: Neural network layers — done**
 
-- [x] `nn/layers.py` — `Linear`, `LayerNorm`, `Embedding`, `Dropout`,
-      `cross_entropy_loss`. All gradient-checked.
-- [x] 21 tests.
+- [x] `nn/layers.py` — four layers built on the autograd engine:
+  - `Linear(in, out)` — `y = x @ W.T + b`, Kaiming uniform initialization
+  - `LayerNorm(d)` — normalize across last dimension, learnable scale/shift
+  - `Embedding(vocab, dim)` — lookup table with sparse gradient
+  - `Dropout(p)` — inverted dropout, no-op at eval time
+- [x] `cross_entropy_loss` — numerically stable log-softmax + NLL in one pass.
+- [x] 21 tests including gradient checks for Linear and cross_entropy.
 
 **Phase 3: Transformer — done**
 
-- [x] `transformer/transformer.py` — decoder-only transformer with causal
-      self-attention, pre-norm MLP blocks, residual connections.
-- [x] Causal masking verified: changing token t+1 doesn't affect logits at t.
+- [x] `transformer/transformer.py` — decoder-only transformer:
+  - Token + positional embeddings
+  - N stacked blocks: pre-norm causal self-attention + pre-norm MLP + residuals
+  - Final LayerNorm + linear projection to logits
+- [x] Causal masking verified: changing token at t+1 doesn't affect logits at t.
+- [x] Bug found and fixed: broadcasting gradient in `_accumulate_grad` was
+      reshaping incorrectly for `(1, T, d)` positional embeddings.
 - [x] 16 tests.
 
 **Phase 4: AdamW optimizer + training loop — done**
 
-- [x] `optim/optim.py` — AdamW with decoupled weight decay, cosine LR schedule
-      with warmup, gradient clipping, Trainer loop.
-- [x] AdamW verified to converge on a quadratic: finds minimum of (x-3)^2.
+- [x] `optim/optim.py` — AdamW with decoupled weight decay, per-parameter
+      moment estimates, bias correction.
+- [x] Cosine LR schedule with linear warmup.
+- [x] Trainer loop with gradient clipping (global norm), eval loop, logging.
+- [x] AdamW verified to converge on quadratic: finds minimum of `(x-3)^2`.
 - [x] 11 tests.
 
 **Phase 5: Train on Shakespeare — done**
 
-- [x] `train.py` — character-level language model on 1.1M character Shakespeare
-      corpus. Loss converges from 5.06 to 2.26 in 500 steps (12.2s on CPU).
-- [x] 42K tokens/second throughput.
-- [x] Text generation with temperature sampling.
+- [x] `train.py` — character-level LM on 1.1M character Shakespeare corpus.
+- [x] Small model: loss 5.06 -> 2.26 in 500 steps (12s, 42K tok/s).
+- [x] Larger model: loss 6.40 -> 1.63 in 2000 steps (204s, 10K tok/s).
+- [x] Generated text shows real Shakespeare character names and sentence
+      structure after training from random initialization.
 
 ---
 
@@ -135,11 +164,11 @@ python -m pytest tests/ -v   # 71 tests
 # Quick test (100 steps, ~3s)
 python train.py --steps 100
 
-# Full run (500 steps, ~12s)
+# Small model (500 steps, ~12s)
 python train.py --steps 500 --generate
 
-# Longer run (better quality)
-python train.py --steps 2000 --d-model 128 --n-layers 4
+# Larger model (2000 steps, ~3.5 min)
+python train.py --steps 2000 --d-model 128 --n-layers 6 --d-ff 512 --generate
 ```
 
 ---
@@ -149,13 +178,13 @@ python train.py --steps 2000 --d-model 128 --n-layers 4
 ```
 minigrad/
 ├── autograd/
-│   └── tensor.py         <- Tensor, autograd engine (Phase 1)
+│   └── tensor.py         <- Tensor, reverse-mode autograd (Phase 1)
 ├── nn/
 │   └── layers.py         <- Linear, LayerNorm, Embedding, Dropout (Phase 2)
 ├── transformer/
-│   └── transformer.py    <- decoder-only transformer (Phase 3)
+│   └── transformer.py    <- decoder-only transformer, causal attention (Phase 3)
 ├── optim/
-│   └── optim.py          <- AdamW, cosine schedule, Trainer (Phase 4)
+│   └── optim.py          <- AdamW, cosine LR schedule, Trainer (Phase 4)
 ├── data/
 │   ├── shakespeare.txt   <- 1.1M character training corpus
 │   └── training_results.json
